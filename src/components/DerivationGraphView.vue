@@ -1,127 +1,232 @@
 <script setup lang="ts">
-  import * as d3 from "d3";
-  import { onMounted, ref, watch } from "vue";
-  import type { DerivationGraph, Node } from "../types/types";
-  
-  const props = defineProps<{
-    graph: DerivationGraph;
-  }>();
-  
-  const svgRef = ref<SVGSVGElement | null>(null);
-  
-  function renderGraph(graph: DerivationGraph) {
-    if (!svgRef.value) return;
-  
-    const width = 1200;
-    const height = 800;
-  
-    const svg = d3
-      .select(svgRef.value)
-      .attr("viewBox", `0 0 ${width} ${height}`)
-      .selectAll("*")
-      .remove();
-  
-    const zoomLayer = d3.select(svgRef.value)
-      .append("g");
-  
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 5])
-      .on("zoom", (event) => {
-        zoomLayer.attr("transform", event.transform);
-      });
-  
-    d3.select(svgRef.value).call(zoom);
-  
-    /* ---------- Build hierarchy ---------- */
-    const rootNode = d3.stratify<Node>()
-      .id(d => d.id)
-      .parentId(d => {
-        const parent = graph.links.find(l => l.target === d.id);
-        return parent ? parent.source : null;
-      })(graph.nodes);
-  
-    const treeLayout = d3.tree<Node>()
-      .nodeSize([160, 100]); // horizontal = 160px, vertical = 100px
-    const hierarchyRoot = treeLayout(rootNode);
-  
-    /* ---------- Links ---------- */
-    const links = hierarchyRoot.links();
-  
-    zoomLayer
-      .append("g")
-      .attr("stroke", "#cbd5e1")
-      .attr("stroke-width", 1.5)
-      .selectAll("line")
-      .data(links)
-      .enter()
-      .append("line")
-      .attr("x1", d => d.source.x)
-      .attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x)
-      .attr("y2", d => d.target.y);
-  
-    /* ---------- Nodes ---------- */
-    const nodes = zoomLayer
-      .append("g")
-      .selectAll("g")
-      .data(hierarchyRoot.descendants())
-      .enter()
-      .append("g")
-      .attr("transform", d => `translate(${d.x}, ${d.y})`)
-      .call(
-        d3.drag<SVGGElement, d3.HierarchyPointNode<Node>>()
-          .on("start", dragStarted)
-          .on("drag", dragged)
-          .on("end", dragEnded)
-      );
-  
-    nodes.append("rect")
-      .attr("x", -60)
-      .attr("y", -18)
-      .attr("width", 120)
-      .attr("height", 36)
-      .attr("rx", 6)
-      .attr("fill", "#f8fafc")
-      .attr("stroke", "#94a3b8");
-  
-    nodes.append("text")
-      .attr("text-anchor", "middle")
-      .attr("dominant-baseline", "middle")
-      .attr("font-size", 11)
-      .attr("fill", "#0f172a")
-      .text(d => d.data.rule);
-  
-    /* ---------- Drag handlers ---------- */
-    function dragStarted(event: any, d: any) {
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-  
-    function dragged(event: any, d: any) {
-      d.fx = event.x;
-      d.fy = event.y;
-      d3.select(event.sourceEvent.target.parentNode)
-        .attr("transform", `translate(${d.fx}, ${d.fy})`);
-      
-      // Update connected lines
-      zoomLayer.selectAll("line")
-        .attr("x1", (l: any) => l.source.x)
-        .attr("y1", (l: any) => l.source.y)
-        .attr("x2", (l: any) => l.target.x)
-        .attr("y2", (l: any) => l.target.y);
-    }
-  
-    function dragEnded(event: any, d: any) {
-      d.fx = null;
-      d.fy = null;
-    }
-  }
-  
-  onMounted(() => renderGraph(props.graph));
-  watch(() => props.graph, renderGraph, { deep: true });
-  </script>
-  
-  <template>
+import * as d3 from "d3";
+import { onMounted, ref, watch, computed } from "vue";
+import type { DerivationGraph, Node } from "../types/types";
+
+const props = defineProps<{ graph: DerivationGraph }>();
+
+const svgRef = ref<SVGSVGElement | null>(null);
+const selectedNodeId = ref<number | null>(null);
+
+let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown>;
+let zoomLayer: d3.Selection<SVGGElement, unknown, null, undefined>;
+let nodePositions = new Map<number, { x: number; y: number }>();
+
+/* ---------- Derived data ---------- */
+const selectedNode = computed(() =>
+  props.graph.nodes.find(n => n.id === selectedNodeId.value) ?? null
+);
+
+const parentNode = computed(() => {
+  if (!selectedNode.value) return null;
+  const link = props.graph.links.find(l => l.target === selectedNode.value!.id);
+  return link
+    ? props.graph.nodes.find(n => n.id === link.source) ?? null
+    : null;
+});
+
+const childNodes = computed(() => {
+  if (!selectedNode.value) return [];
+  return props.graph.links
+    .filter(l => l.source === selectedNode.value!.id)
+    .map(l => props.graph.nodes.find(n => n.id === l.target))
+    .filter(Boolean) as Node[];
+});
+
+/* ---------- Graph rendering ---------- */
+function renderGraph(graph: DerivationGraph) {
+  if (!svgRef.value) return;
+
+  const width = 1200;
+  const height = 800;
+
+  d3.select(svgRef.value).selectAll("*").remove();
+
+  const svg = d3
+    .select(svgRef.value)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  zoomLayer = svg.append("g");
+
+  zoomBehavior = d3.zoom<SVGSVGElement, unknown>()
+    .scaleExtent([0.2, 4])
+    .on("zoom", (event) => {
+      zoomLayer.attr("transform", event.transform);
+    });
+
+  svg.call(zoomBehavior);
+
+  /* ---------- Hierarchy ---------- */
+  const rootNode = d3.stratify<Node>()
+    .id(d => d.id.toString())
+    .parentId(d => {
+      const parent = graph.links.find(l => l.target === d.id);
+      return parent ? parent.source.toString() : null;
+    })(graph.nodes);
+
+  const treeLayout = d3.tree<Node>().nodeSize([160, 100]);
+  const hierarchyRoot = treeLayout(rootNode);
+
+  /* ---------- Store positions ---------- */
+  nodePositions.clear();
+  hierarchyRoot.descendants().forEach(d => {
+    nodePositions.set(d.data.id, { x: d.x, y: d.y });
+  });
+
+  /* ---------- Links ---------- */
+  zoomLayer.append("g")
+    .attr("stroke", "#cbd5e1")
+    .attr("stroke-width", 1.5)
+    .selectAll("line")
+    .data(hierarchyRoot.links())
+    .enter()
+    .append("line")
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y);
+
+  /* ---------- Nodes ---------- */
+  const nodes = zoomLayer.append("g")
+    .selectAll("g")
+    .data(hierarchyRoot.descendants())
+    .enter()
+    .append("g")
+    .attr("transform", d => `translate(${d.x}, ${d.y})`)
+    .style("cursor", "pointer")
+    .on("click", (_, d) => selectNode(d.data.id));
+
+  nodes.append("rect")
+    .attr("x", -60)
+    .attr("y", -18)
+    .attr("width", 120)
+    .attr("height", 36)
+    .attr("rx", 6)
+    .attr("fill", d =>
+      d.data.id === selectedNodeId.value ? "#e0f2fe" : "#f8fafc"
+    )
+    .attr("stroke", "#94a3b8");
+
+  nodes.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dominant-baseline", "middle")
+    .attr("font-size", 11)
+    .attr("fill", "#0f172a")
+    .text(d => d.data.rule);
+}
+
+/* ---------- Selection + focus ---------- */
+function selectNode(id: number) {
+  selectedNodeId.value = id;
+  focusNode(id);
+  renderGraph(props.graph); // update highlight
+}
+
+function focusNode(id: number) {
+  if (!svgRef.value) return;
+
+  const pos = nodePositions.get(id);
+  if (!pos) return;
+
+  const width = 1200;
+  const height = 800;
+  const scale = 1.2;
+
+  const tx = width / 2 - pos.x * scale;
+  const ty = height / 2 - pos.y * scale;
+
+  const svg = d3.select(svgRef.value);
+
+  svg.transition()
+    .duration(500)
+    .call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(tx, ty).scale(scale)
+    );
+}
+
+
+onMounted(() => renderGraph(props.graph));
+watch(() => props.graph, renderGraph, { deep: true });
+
+const siblingNodes = computed(() => {
+  if (!parentNode.value) return [];
+
+  return props.graph.links
+    .filter(
+      l =>
+        l.source === parentNode.value!.id &&
+        l.target !== selectedNode.value!.id
+    )
+    .map(l => props.graph.nodes.find(n => n.id === l.target))
+    .filter(Boolean) as Node[];
+});
+
+</script>
+
+
+<template>
+  <div class="flex gap-4">
+    <!-- Graph -->
     <svg ref="svgRef" class="w-full h-[800px] border rounded-lg bg-white" />
-  </template>
-  
+
+    <!-- Side panel -->
+    <div v-if="selectedNode" class="w-80 border rounded-lg p-4 bg-slate-50 text-sm">
+      <h2 class="font-semibold mb-2">Node {{ selectedNode.id }}</h2>
+
+      <p class="mb-2">
+        <strong>Rule:</strong><br />
+        {{ selectedNode.rule }}
+      </p>
+
+      <p class="mb-2">
+        <strong>Inputs:</strong>
+        <span v-if="selectedNode.inputs.length">
+          {{ selectedNode.inputs.join(", ") }}
+        </span>
+        <span v-else class="text-slate-400">none</span>
+      </p>
+
+      <p class="mb-2">
+        <strong>Outputs:</strong>
+        <span v-if="selectedNode.outputs.length">
+          {{ selectedNode.outputs.join(", ") }}
+        </span>
+        <span v-else class="text-slate-400">none</span>
+      </p>
+
+      <div v-if="parentNode" class="mb-3">
+        <button class="text-blue-600 hover:underline" @click="selectNode(parentNode.id)">
+          ↑ Go to parent
+        </button>
+      </div>
+
+      <div class="mb-3">
+        <strong>Siblings:</strong>
+        <ul class="list-disc ml-5 mt-1">
+          <li v-for="sib in siblingNodes" :key="sib.id" class="cursor-pointer text-blue-600 hover:underline"
+            @click="selectNode(sib.id)">
+            {{ sib.rule }}
+          </li>
+        </ul>
+        <p v-if="!siblingNodes.length" class="text-slate-400">
+          No siblings
+        </p>
+      </div>
+
+
+      <div>
+        <strong>Children:</strong>
+        <ul class="list-disc ml-5 mt-1">
+          <li v-for="child in childNodes" :key="child.id" class="cursor-pointer text-blue-600 hover:underline"
+            @click="selectNode(child.id)">
+            {{ child.rule }}
+          </li>
+        </ul>
+        <p v-if="!childNodes.length" class="text-slate-400">
+          No children
+        </p>
+      </div>
+    </div>
+  </div>
+</template>
