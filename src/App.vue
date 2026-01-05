@@ -6,11 +6,9 @@ const { data, error } = useDerivationGraph();
 </script>
 
 <template>
-  <div class="p-4">
     <div v-if="error" class="text-red-600 mb-2">
       {{ error }}
     </div>
 
     <DerivationGraphView v-if="data" :graph="data" />
-  </div>
 </template>
