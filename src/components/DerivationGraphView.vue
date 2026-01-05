@@ -178,6 +178,10 @@
   
       <!-- Sidebar -->
       <aside class="w-96 h-full border-l bg-slate-50 p-4 overflow-y-auto text-sm">
+          <div v-if="selectedNodeId !== null" class="flex text-blue-600 justify-between mb-3">
+            <button :disabled="selectedNodeId === 0" class="cursor-pointer hover:underline disabled:text-slate-400 disabled:hover:no-underline disabled:cursor-not-allowed" @click="selectNode(selectedNodeId - 1)">← Previous node</button>
+            <button :disabled="selectedNodeId === props.graph.nodes.length - 1" class="cursor-pointer hover:underline disabled:text-slate-400 disabled:hover:no-underline disabled:cursor-not-allowed" @click="selectNode(selectedNodeId + 1)">Next node →</button>
+          </div>
         <!-- Search -->
         <div class="mb-4">
           <input
